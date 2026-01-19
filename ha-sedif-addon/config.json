@@ -2,7 +2,7 @@
   "name": "SEDIF Water Consumption",
   "slug": "ha-sedif",
   "description": "Scrape SEDIF consumption and publish sensors to Home Assistant",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "url": "https://github.com/Artus/ha-sedif",
   "arch": [
     "amd64",
@@ -10,6 +10,9 @@
   ],
   "homeassistant_api": true,
   "host_network": true,
+  "services": [
+    "mqtt:need"
+  ],
   "startup": "services",
   "boot": "auto",
   "options": {
@@ -17,13 +20,25 @@
     "sedif_password": "",
     "debug": false,
     "sensor_prefix": "sedif",
-    "refresh_interval_minutes": 360
+    "refresh_interval_minutes": 360,
+    "mqtt_host": "core-mosquitto",
+    "mqtt_port": 1883,
+    "mqtt_username": "",
+    "mqtt_password": "",
+    "mqtt_discovery_prefix": "homeassistant",
+    "mqtt_base_topic": "sedif"
   },
   "schema": {
     "sedif_username": "str",
     "sedif_password": "password",
     "debug": "bool",
     "sensor_prefix": "str",
-    "refresh_interval_minutes": "int"
+    "refresh_interval_minutes": "int",
+    "mqtt_host": "str",
+    "mqtt_port": "int",
+    "mqtt_username": "str",
+    "mqtt_password": "password",
+    "mqtt_discovery_prefix": "str",
+    "mqtt_base_topic": "str"
   }
 }

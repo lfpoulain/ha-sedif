@@ -6,12 +6,12 @@ import json
 import os
 import re
 import sys
-import urllib.request
 from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from dateutil import parser as date_parser
 from dotenv import load_dotenv
+from paho.mqtt import client as mqtt
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
@@ -81,7 +81,13 @@ def _coerce_float(value: Any) -> Optional[float]:
 def _round_money(value: Optional[float]) -> Optional[float]:
     if value is None:
         return None
-    return round(value, 2)
+    return round(value, 3)
+
+
+def _round_value(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    return round(value, 3)
 
 
 def _normalize_key(key: str) -> str:
@@ -249,6 +255,9 @@ def normalize_record(record: Dict[str, Any], price_m3: Optional[float]) -> Optio
             m3 = volume_value
             liters = volume_value * 1000.0
 
+    liters = _round_value(liters) or 0
+    m3 = _round_value(m3) or 0
+
     if cost_value is None and price_m3 is not None:
         cost_value = m3 * price_m3
     cost_value = _round_money(cost_value)
@@ -308,18 +317,18 @@ def aggregate_last_days(
         deduped.append(record)
 
     totals = {
-        "total_liters": sum(r["liters"] for r in deduped),
-        "total_m3": sum(r["m3"] for r in deduped),
+        "total_liters": _round_value(sum(r["liters"] for r in deduped)) or 0,
+        "total_m3": _round_value(sum(r["m3"] for r in deduped)) or 0,
         "total_euros": _round_money(
             sum(r["euros"] for r in deduped if r.get("euros") is not None)
-        ),
+        )
+        or 0,
     }
 
     day_count = len(deduped)
-    avg_daily_liters = totals["total_liters"] / day_count if day_count else 0
-    avg_daily_m3 = totals["total_m3"] / day_count if day_count else 0
-    avg_daily_euros = totals["total_euros"] / day_count if day_count else 0
-    avg_daily_euros = _round_money(avg_daily_euros) or 0
+    avg_daily_liters = _round_value(totals["total_liters"] / day_count) if day_count else 0
+    avg_daily_m3 = _round_value(totals["total_m3"] / day_count) if day_count else 0
+    avg_daily_euros = _round_money(totals["total_euros"] / day_count) if day_count else 0
 
     last_record = max(deduped, key=lambda r: r["date"], default=None)
     last_date = last_record["date"] if last_record else None
@@ -342,11 +351,12 @@ def aggregate_last_days(
         if week_start <= datetime.fromisoformat(record["date"]).date() <= end_date
     ]
     week_totals = {
-        "wtd_liters": sum(r["liters"] for r in week_records),
-        "wtd_m3": sum(r["m3"] for r in week_records),
+        "wtd_liters": _round_value(sum(r["liters"] for r in week_records)) or 0,
+        "wtd_m3": _round_value(sum(r["m3"] for r in week_records)) or 0,
         "wtd_euros": _round_money(
             sum(r["euros"] for r in week_records if r.get("euros") is not None)
-        ),
+        )
+        or 0,
     }
     week_day_count = len(week_records)
 
@@ -357,17 +367,18 @@ def aggregate_last_days(
         if month_start <= datetime.fromisoformat(record["date"]).date() <= end_date
     ]
     month_totals = {
-        "mtd_liters": sum(r["liters"] for r in month_records),
-        "mtd_m3": sum(r["m3"] for r in month_records),
+        "mtd_liters": _round_value(sum(r["liters"] for r in month_records)) or 0,
+        "mtd_m3": _round_value(sum(r["m3"] for r in month_records)) or 0,
         "mtd_euros": _round_money(
             sum(r["euros"] for r in month_records if r.get("euros") is not None)
-        ),
+        )
+        or 0,
     }
     month_day_count = len(month_records)
     days_in_month = calendar.monthrange(end_date.year, end_date.month)[1]
     estimate_month_euros: Optional[float] = None
     if price_m3 is not None and month_day_count > 0:
-        avg_daily_m3_month = month_totals["mtd_m3"] / month_day_count
+        avg_daily_m3_month = (month_totals["mtd_m3"] / month_day_count) if month_day_count else 0
         estimate_month_euros = _round_money(avg_daily_m3_month * days_in_month * price_m3)
 
     analytics = {
@@ -405,7 +416,16 @@ def aggregate_last_days(
     }
 
 
-def publish_to_home_assistant(result: Dict[str, Any], ha_url: str, token: str, prefix: str) -> None:
+def publish_to_mqtt(
+    result: Dict[str, Any],
+    mqtt_host: str,
+    mqtt_port: int,
+    mqtt_username: Optional[str],
+    mqtt_password: Optional[str],
+    prefix: str,
+    discovery_prefix: str,
+    base_topic: str,
+) -> None:
     totals = result.get("totals", {})
     daily = result.get("daily", [])
     last_day = daily[-1] if daily else {}
@@ -413,7 +433,7 @@ def publish_to_home_assistant(result: Dict[str, Any], ha_url: str, token: str, p
     metadata = result.get("metadata", {})
     analytics = result.get("analytics", {})
     device_info = {
-        "identifiers": [["sedif", prefix]],
+        "identifiers": [f"sedif_{prefix}"],
         "name": "SEDIF Water Consumption",
         "manufacturer": "SEDIF",
         "model": "Web Portal",
@@ -421,12 +441,11 @@ def publish_to_home_assistant(result: Dict[str, Any], ha_url: str, token: str, p
 
     last_day_euros = _round_money(last_day.get("euros"))
     sensors = {
-        f"sensor.{prefix}_daily": {
+        "daily": {
             "state": last_day.get("liters", 0),
+            "name": "Consommation du dernier relevé (litres)",
+            "unit": "L",
             "attributes": {
-                "device": device_info,
-                "friendly_name": "Consommation du dernier relevé (litres)",
-                "unit_of_measurement": "L",
                 "last_date": last_day.get("date"),
                 "last_m3": last_day.get("m3"),
                 "last_euros": last_day_euros,
@@ -434,52 +453,47 @@ def publish_to_home_assistant(result: Dict[str, Any], ha_url: str, token: str, p
                 "daily": daily,
             },
         },
-        f"sensor.{prefix}_daily_euros": {
+        "daily_euros": {
             "state": last_day_euros or 0,
+            "name": "Coût du dernier relevé (EUR)",
+            "unit": "EUR",
             "attributes": {
-                "device": device_info,
-                "friendly_name": "Coût du dernier relevé (EUR)",
-                "unit_of_measurement": "EUR",
                 "last_date": last_day.get("date"),
                 "last_liters": last_day.get("liters"),
                 "last_m3": last_day.get("m3"),
                 "price_m3": price_m3,
             },
         },
-        f"sensor.{prefix}_max_m3": {
+        "max_m3": {
             "state": metadata.get("consommation_max_m3", 0),
+            "name": "Consommation maximale (m³)",
+            "unit": "m3",
             "attributes": {
-                "device": device_info,
-                "friendly_name": "Consommation maximale (m³)",
-                "unit_of_measurement": "m3",
                 "date": metadata.get("date_consommation_max"),
                 "price_m3": price_m3,
             },
         },
-        f"sensor.{prefix}_avg_m3": {
+        "avg_m3": {
             "state": metadata.get("consommation_moyenne_m3", 0),
+            "name": "Consommation moyenne (m³)",
+            "unit": "m3",
             "attributes": {
-                "device": device_info,
-                "friendly_name": "Consommation moyenne (m³)",
-                "unit_of_measurement": "m3",
                 "price_m3": price_m3,
             },
         },
-        f"sensor.{prefix}_meter_index": {
+        "meter_index": {
             "state": metadata.get("index_last_value", 0),
+            "name": "Index compteur (m³)",
+            "unit": "m3",
             "attributes": {
-                "device": device_info,
-                "friendly_name": "Index compteur (m³)",
-                "unit_of_measurement": "m3",
                 "date": metadata.get("index_last_date"),
                 "raw": metadata.get("index_last_raw"),
             },
         },
-        f"sensor.{prefix}_info": {
+        "info": {
             "state": metadata.get("numero_compteur") or metadata.get("id_pds") or "sedif",
+            "name": "Informations compteur",
             "attributes": {
-                "device": device_info,
-                "friendly_name": "Informations compteur",
                 "numero_compteur": metadata.get("numero_compteur"),
                 "id_pds": metadata.get("id_pds"),
                 "date_debut": metadata.get("date_debut"),
@@ -492,12 +506,11 @@ def publish_to_home_assistant(result: Dict[str, Any], ha_url: str, token: str, p
                 "price_m3": price_m3,
             },
         },
-        f"sensor.{prefix}_week_to_date_m3": {
+        "week_to_date_m3": {
             "state": analytics.get("wtd_m3", 0),
+            "name": "Consommation semaine en cours (m³)",
+            "unit": "m3",
             "attributes": {
-                "device": device_info,
-                "friendly_name": "Consommation semaine en cours (m³)",
-                "unit_of_measurement": "m3",
                 "liters": analytics.get("wtd_liters"),
                 "euros": analytics.get("wtd_euros"),
                 "from": analytics.get("week_start"),
@@ -506,12 +519,11 @@ def publish_to_home_assistant(result: Dict[str, Any], ha_url: str, token: str, p
                 "price_m3": price_m3,
             },
         },
-        f"sensor.{prefix}_month_to_date_m3": {
+        "month_to_date_m3": {
             "state": analytics.get("mtd_m3", 0),
+            "name": "Consommation mois en cours (m³)",
+            "unit": "m3",
             "attributes": {
-                "device": device_info,
-                "friendly_name": "Consommation mois en cours (m³)",
-                "unit_of_measurement": "m3",
                 "liters": analytics.get("mtd_liters"),
                 "euros": analytics.get("mtd_euros"),
                 "from": analytics.get("month_start"),
@@ -520,33 +532,31 @@ def publish_to_home_assistant(result: Dict[str, Any], ha_url: str, token: str, p
                 "price_m3": price_m3,
             },
         },
-        f"sensor.{prefix}_monthly_estimate_euros": {
+        "monthly_estimate_euros": {
             "state": analytics.get("estimate_month_euros") or 0,
+            "name": "Estimation facture mensuelle (EUR)",
+            "unit": "EUR",
             "attributes": {
-                "device": device_info,
-                "friendly_name": "Estimation facture mensuelle (EUR)",
-                "unit_of_measurement": "EUR",
                 "days_in_month": analytics.get("days_in_month"),
                 "month_day_count": analytics.get("month_day_count"),
                 "mtd_m3": analytics.get("mtd_m3"),
                 "price_m3": price_m3,
             },
         },
-        f"sensor.{prefix}_last_reading_date": {
+        "last_reading_date": {
             "state": metadata.get("index_last_date") or analytics.get("last_date") or "unknown",
+            "name": "Date du dernier relevé",
+            "device_class": "date",
             "attributes": {
-                "device": device_info,
-                "friendly_name": "Date du dernier relevé",
                 "last_date": metadata.get("index_last_date") or analytics.get("last_date"),
                 "index_last_value": metadata.get("index_last_value"),
                 "index_last_raw": metadata.get("index_last_raw"),
             },
         },
-        f"sensor.{prefix}_overconsumption": {
+        "overconsumption": {
             "state": analytics.get("overconsumption_level", "unknown"),
+            "name": "Surconsommation (référence 40 jours)",
             "attributes": {
-                "device": device_info,
-                "friendly_name": "Surconsommation (référence 40 jours)",
                 "ratio": analytics.get("overconsumption_ratio"),
                 "threshold_high": 2,
                 "threshold_critical": 3,
@@ -557,21 +567,41 @@ def publish_to_home_assistant(result: Dict[str, Any], ha_url: str, token: str, p
         },
     }
 
-    base = ha_url.rstrip("/")
-    for entity_id, payload in sensors.items():
-        url = f"{base}/api/states/{entity_id}"
-        body = json.dumps(payload).encode("utf-8")
-        request = urllib.request.Request(
-            url,
-            data=body,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
+    client = mqtt.Client()
+    if mqtt_username:
+        client.username_pw_set(mqtt_username, mqtt_password or "")
+    client.connect(mqtt_host, mqtt_port, keepalive=30)
+
+    for sensor_key, payload in sensors.items():
+        unique_id = f"{prefix}_{sensor_key}"
+        state_topic = f"{base_topic}/{sensor_key}/state"
+        attributes_topic = f"{base_topic}/{sensor_key}/attributes"
+        config_topic = f"{discovery_prefix}/sensor/{unique_id}/config"
+        config_payload = {
+            "name": payload["name"],
+            "unique_id": unique_id,
+            "state_topic": state_topic,
+            "json_attributes_topic": attributes_topic,
+            "device": device_info,
+        }
+        if payload.get("unit"):
+            config_payload["unit_of_measurement"] = payload["unit"]
+        if payload.get("device_class"):
+            config_payload["device_class"] = payload["device_class"]
+
+        client.publish(config_topic, json.dumps(config_payload, ensure_ascii=False), retain=True)
+
+        state_value = payload.get("state")
+        if state_value is None:
+            state_value = "unknown"
+        client.publish(state_topic, str(state_value), retain=True)
+        client.publish(
+            attributes_topic,
+            json.dumps(payload.get("attributes", {}), ensure_ascii=False),
+            retain=True,
         )
-        with urllib.request.urlopen(request, timeout=30) as response:
-            response.read()
+
+    client.disconnect()
 
 
 def _fill_first(page, selectors: Iterable[str], value: str) -> bool:
@@ -759,14 +789,32 @@ def main() -> None:
     result = fetch_consumption(args.days, headless=headless)
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
-    ha_url = os.getenv("HA_URL")
-    ha_token = os.getenv("HA_TOKEN")
     prefix = os.getenv("HA_SENSOR_PREFIX", "sedif")
-    if ha_url and ha_token and isinstance(result, dict) and "error" not in result:
+    mqtt_host = os.getenv("MQTT_HOST")
+    mqtt_port = int(os.getenv("MQTT_PORT", "1883"))
+    mqtt_username = os.getenv("MQTT_USERNAME")
+    mqtt_password = os.getenv("MQTT_PASSWORD")
+    discovery_prefix = os.getenv("MQTT_DISCOVERY_PREFIX", "homeassistant")
+    base_topic = os.getenv("MQTT_BASE_TOPIC", "sedif")
+    if not mqtt_host:
+        print(
+            "[warn] MQTT non configuré : renseignez mqtt_host ou installez l'add-on MQTT officiel.",
+            file=sys.stderr,
+        )
+    if mqtt_host and isinstance(result, dict) and "error" not in result:
         try:
-            publish_to_home_assistant(result, ha_url, ha_token, prefix)
+            publish_to_mqtt(
+                result,
+                mqtt_host,
+                mqtt_port,
+                mqtt_username,
+                mqtt_password,
+                prefix,
+                discovery_prefix,
+                base_topic,
+            )
         except Exception as exc:
-            print(f"[warn] HA publish failed: {exc}", file=sys.stderr)
+            print(f"[warn] MQTT publish failed: {exc}", file=sys.stderr)
 
 
 if __name__ == "__main__":

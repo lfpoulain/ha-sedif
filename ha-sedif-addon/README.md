@@ -16,6 +16,14 @@ et publie les métriques essentielles (dernier relevé, semaine/mois en cours, s
 - `debug`: Active les logs debug (défaut: false).
 - `sensor_prefix`: Préfixe des entités (défaut: sedif).
 - `refresh_interval_minutes`: Fréquence d'exécution en minutes (défaut: 360).
+- `mqtt_host`: Hôte MQTT (défaut: core-mosquitto).
+- `mqtt_port`: Port MQTT (défaut: 1883).
+- `mqtt_username`: Utilisateur MQTT.
+- `mqtt_password`: Mot de passe MQTT.
+- `mqtt_discovery_prefix`: Préfixe MQTT discovery (défaut: homeassistant).
+- `mqtt_base_topic`: Base topic (défaut: sedif).
+
+Si l'add-on officiel MQTT est installé, l'auto-configuration Supervisor est utilisée.
 
 ## Fonctionnement
 
@@ -23,7 +31,8 @@ et publie les métriques essentielles (dernier relevé, semaine/mois en cours, s
 - La collecte est **fixée à 40 jours** (base des moyennes et de la surconsommation).
 - La semaine/mois en cours sont calculés à partir des relevés journaliers.
 - Si l'API ne renvoie pas les euros, l'addon calcule le coût avec `prixMoyenEau` (€/m³).
-- Tous les montants en euros sont arrondis au centime.
+- Tous les montants sont arrondis à 3 décimales.
+- Les entités sont créées via MQTT Discovery avec `unique_id` stable.
 
 ## Capteurs créés
 

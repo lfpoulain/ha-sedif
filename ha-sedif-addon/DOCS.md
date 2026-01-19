@@ -7,6 +7,14 @@
 - `debug`: Active les logs debug (défaut: false).
 - `sensor_prefix`: Préfixe des entités Home Assistant (défaut: sedif).
 - `refresh_interval_minutes`: Fréquence de rafraîchissement (défaut: 360).
+- `mqtt_host`: Hôte MQTT (défaut: core-mosquitto).
+- `mqtt_port`: Port MQTT (défaut: 1883).
+- `mqtt_username`: Utilisateur MQTT.
+- `mqtt_password`: Mot de passe MQTT.
+- `mqtt_discovery_prefix`: Préfixe MQTT discovery (défaut: homeassistant).
+- `mqtt_base_topic`: Base topic (défaut: sedif).
+
+Si l'add-on officiel MQTT est installé, l'auto-configuration Supervisor est utilisée.
 
 ## Fonctionnement
 
@@ -34,7 +42,7 @@ Les données détaillées sont exposées dans les attributs des capteurs.
 Si le site ne fournit pas directement les euros, l'addon calcule le coût via `prixMoyenEau` (€/m³)
 et expose la valeur dans `price_m3`.
 
-Les montants en euros sont arrondis au centime.
+Les montants sont arrondis à 3 décimales.
 
 ## Appareil
 
